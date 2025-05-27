@@ -1,0 +1,87 @@
+# =========================================================
+# 1) 依赖（如已安装可跳过）
+!pip install -q pdfplumber pandas openpyxl
+
+import os, zipfile, re, itertools
+import pandas as pd
+import pdfplumber
+from google.colab import drive
+
+
+use_zip      = True   # ← False 表示你已经有 PDF 文件夹，不用解压 zip
+zip_path     = '/content/drive/MyDrive/1.zip'
+invoices_dir = '/content/drive/MyDrive/发票/pdf'   # 当 use_zip=False 时使用
+# ===================================
+
+# 3) 准备待处理目录
+extract_dir = '/content/invoices'
+if use_zip:
+    os.makedirs(extract_dir, exist_ok=True)
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        z.extractall(extract_dir)
+else:
+    extract_dir = invoices_dir
+
+# =========================================================
+# 4) 正则 & 辅助函数
+import re
+
+# ===== ① 噪声规则（同前，略）=====
+_units   = ['ml','mL','L','g','kg','mg','μL','uL','mmol','mol',
+            '个','件','瓶','盒','支','包','米']
+unit_re  = '|'.join(_units)
+noise_re = re.compile(
+    rf"""\d[\d.]*%? | \d[\d.]*\s*(?:{unit_re})\b |
+        [A-Za-z]{{1,4}}≥\d+%? | [A-Za-z]{{2,10}}%? |
+        ≥\s*\d+%? | Energyseal|Acros|Aladdin|Sigma|Merck
+    """, re.I | re.X)
+
+# ===== ② 额外的括号/破折号/孤立 g 处理 =====
+brackets_and_dash = re.compile(r"[()\[\]【】（）\-–—]+")
+lonely_g          = re.compile(r"\bg\b", re.I)          # 单独的 g
+
+def clean_name(raw: str) -> str:
+    """
+    step-1  先删所有噪声（数字%、单位、品牌…）
+    step-2  去掉括号、破折号
+    step-3  去掉孤立 g（含 g()、--g 等已被 step-2 拆分）
+    """
+    name = noise_re.sub('', raw)
+    name = brackets_and_dash.sub('', name)
+    name = lonely_g.sub('', name)
+    name = re.sub(r"[，,;；/\\\s]+", '', name)   # 最后再扫一遍标点/空格
+    return name.strip()
+
+
+# =========================================================
+# 5) 主循环：遍历 PDF
+records = []
+
+for fname in sorted(os.listdir(extract_dir)):
+    if not fname.lower().endswith('.pdf'):
+        continue
+    pdf_file = os.path.join(extract_dir, fname)
+
+    # ---- 5-1 提取纯文本
+    with pdfplumber.open(pdf_file) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+    # ---- 5-2 项目名称们 → “、” 拼接
+    items = extract_items(text)
+    item_str = "、".join(items)
+
+    # ---- 5-3 价税合计
+    tot_match = total_pat.search(text)
+    total_val = float(tot_match.group(1).replace(",", "")) if tot_match else None
+
+    records.append({"文件名": fname,
+                    "项目名称": item_str,
+                    "价税合计": total_val})
+
+# =========================================================
+# 6) 输出 Excel
+df = pd.DataFrame(records)
+excel_path = '/content/drive/MyDrive/发票汇总.xlsx'
+df.to_excel(excel_path, index=False)
+
+print("✅ 已完成！结果保存在：", excel_path)
